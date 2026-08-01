@@ -9,9 +9,9 @@ const {
   VoiceConnectionStatus,
   StreamType,
 } = require('@discordjs/voice');
-const yandexMusic = require('./yandexMusic');
+const youtubeMusic = require('./youtubeMusic');
 
-// guildId -> { connection, player, queue: Track[], current: Track|null, radio: {sessionId, batchId}|null }
+// guildId -> { connection, player, queue: Track[], current: Track|null, radio: {seedId, originalSeedId}|null }
 const states = new Map();
 
 function getState(guildId) {
@@ -44,8 +44,8 @@ async function playNext(guildId) {
   if (!state.player) return;
 
   if (!state.queue.length && state.radio) {
-    const { batchId, tracks } = await yandexMusic.continueRadio(state.radio.sessionId, state.radio.batchId);
-    state.radio.batchId = batchId;
+    const { seedId, tracks } = await youtubeMusic.continueRadio(state.radio.seedId, state.radio.originalSeedId);
+    state.radio.seedId = seedId;
     state.queue.push(...tracks);
   }
 
@@ -56,7 +56,7 @@ async function playNext(guildId) {
   }
 
   state.current = next;
-  const streamUrl = await yandexMusic.getStreamUrl(next.id).catch((error) => {
+  const streamUrl = await youtubeMusic.getStreamUrl(next.id).catch((error) => {
     console.error(`Не удалось получить ссылку на трек "${next.title}":`, error);
     return null;
   });
@@ -106,10 +106,10 @@ async function enqueue(voiceChannel, tracks) {
   if (!state.current) await playNext(voiceChannel.guild.id);
 }
 
-async function playRadio(voiceChannel, { sessionId, batchId, tracks }) {
+async function playRadio(voiceChannel, { seedId, originalSeedId, tracks }) {
   await connect(voiceChannel);
   const state = getState(voiceChannel.guild.id);
-  state.radio = { sessionId, batchId };
+  state.radio = { seedId, originalSeedId };
   state.queue.push(...tracks);
   if (!state.current) await playNext(voiceChannel.guild.id);
 }

@@ -5,7 +5,7 @@ const {
   ActionRowBuilder,
   MessageFlags,
 } = require('discord.js');
-const yandexMusic = require('../services/yandexMusic');
+const youtubeMusic = require('../services/youtubeMusic');
 const musicPlayer = require('../services/musicPlayer');
 
 const SEARCH_SELECT_ID = 'music-search-select';
@@ -30,7 +30,7 @@ module.exports = {
 
   data: new SlashCommandBuilder()
     .setName('music')
-    .setDescription('Музыка из Яндекс.Музыки в голосовом канале')
+    .setDescription('Музыка из YouTube Music в голосовом канале')
     .addSubcommand((sub) =>
       sub
         .setName('play')
@@ -41,20 +41,16 @@ module.exports = {
       sub
         .setName('search')
         .setDescription('Поиск с выбором из списка')
-        .addStringOption((opt) => opt.setName('query').setDescription('Что искать').setRequired(true))
+        .addStringOption((opt) => opt.setName('query').setDescription('Что искать').setRequired(true)),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('radio')
+        .setDescription('Включить похожие треки (YouTube Mix)')
         .addStringOption((opt) =>
-          opt
-            .setName('type')
-            .setDescription('Тип поиска (по умолчанию — трек)')
-            .addChoices(
-              { name: 'Трек', value: 'track' },
-              { name: 'Исполнитель', value: 'artist' },
-              { name: 'Альбом', value: 'album' },
-            ),
+          opt.setName('query').setDescription('От какого трека оттолкнуться (по умолчанию — текущий)'),
         ),
     )
-    .addSubcommand((sub) => sub.setName('favorites').setDescription('Включить любимые треки'))
-    .addSubcommand((sub) => sub.setName('radio').setDescription('Включить "Мою волну"'))
     .addSubcommand((sub) => sub.setName('skip').setDescription('Пропустить текущий трек'))
     .addSubcommand((sub) => sub.setName('pause').setDescription('Поставить на паузу'))
     .addSubcommand((sub) => sub.setName('resume').setDescription('Снять с паузы'))
@@ -123,7 +119,7 @@ module.exports = {
 
     if (sub === 'play') {
       const query = interaction.options.getString('query');
-      const results = await yandexMusic.searchTracks(query, 1);
+      const results = await youtubeMusic.searchTracks(query, 1);
       if (!results.length) {
         await interaction.editReply(`Ничего не нашёл по запросу "${query}".`);
         return;
@@ -133,47 +129,44 @@ module.exports = {
       return;
     }
 
-    if (sub === 'favorites') {
-      const tracks = await yandexMusic.getFavorites();
-      if (!tracks.length) {
-        await interaction.editReply('В любимых треках пусто.');
+    if (sub === 'radio') {
+      const query = interaction.options.getString('query');
+      let seedId = query ? null : musicPlayer.getQueue(interaction.guild.id).current?.id;
+
+      if (query) {
+        const results = await youtubeMusic.searchTracks(query, 1);
+        if (!results.length) {
+          await interaction.editReply(`Ничего не нашёл по запросу "${query}".`);
+          return;
+        }
+        seedId = results[0].id;
+      }
+
+      if (!seedId) {
+        await interaction.editReply(
+          'Укажи query, от какого трека оттолкнуться, либо сначала запусти что-нибудь через /music play.',
+        );
         return;
       }
-      await musicPlayer.enqueue(voiceChannel, tracks);
-      await interaction.editReply(`Добавил в очередь ${tracks.length} любимых треков.`);
-      return;
-    }
 
-    if (sub === 'radio') {
-      const radio = await yandexMusic.startRadio();
+      const radio = await youtubeMusic.startRadio(seedId);
+      if (!radio.tracks.length) {
+        await interaction.editReply('Не удалось найти похожие треки для этого трека.');
+        return;
+      }
       await musicPlayer.playRadio(voiceChannel, radio);
-      await interaction.editReply('Включил "Мою волну" 📻');
+      await interaction.editReply('Включил похожие треки 📻');
       return;
     }
 
     if (sub === 'search') {
       const query = interaction.options.getString('query');
-      const type = interaction.options.getString('type') ?? 'track';
-
-      let options = [];
-      if (type === 'track') {
-        const tracks = await yandexMusic.searchTracks(query);
-        options = tracks.map((t) => ({
-          label: t.title.slice(0, 100),
-          description: t.artists.slice(0, 100),
-          value: `track:${t.id}`,
-        }));
-      } else if (type === 'artist') {
-        const artists = await yandexMusic.searchArtists(query);
-        options = artists.map((a) => ({ label: a.name.slice(0, 100), value: `artist:${a.id}` }));
-      } else {
-        const albums = await yandexMusic.searchAlbums(query);
-        options = albums.map((a) => ({
-          label: a.title.slice(0, 100),
-          description: a.artists.slice(0, 100),
-          value: `album:${a.id}`,
-        }));
-      }
+      const tracks = await youtubeMusic.searchTracks(query);
+      const options = tracks.map((t) => ({
+        label: t.title.slice(0, 100),
+        description: t.artists.slice(0, 100),
+        value: `track:${t.id}`,
+      }));
 
       if (!options.length) {
         await interaction.editReply(`Ничего не нашёл по запросу "${query}".`);
@@ -207,26 +200,18 @@ module.exports = {
 
     await interaction.deferUpdate();
 
-    const [type, idStr] = interaction.values[0].split(':');
-    const id = Number(idStr);
+    const [, videoId] = interaction.values[0].split(':');
+    const track = await youtubeMusic.getTrackById(videoId);
 
-    let tracks = [];
-    if (type === 'track') {
-      tracks = await yandexMusic.getTracksByIds([id]);
-    } else if (type === 'artist') {
-      tracks = await yandexMusic.getArtistTracks(id);
-    } else {
-      tracks = await yandexMusic.getAlbumTracks(id);
-    }
-
-    if (!tracks.length) {
-      await interaction.editReply({ content: 'Не нашёл треков для этого выбора.', components: [] });
+    if (!track) {
+      await interaction.editReply({ content: 'Не нашёл трек для этого выбора.', components: [] });
       return;
     }
 
-    await musicPlayer.enqueue(voiceChannel, tracks);
-    const summary =
-      tracks.length === 1 ? `**${tracks[0].title}** — ${tracks[0].artists}` : `${tracks.length} треков`;
-    await interaction.editReply({ content: `Добавил в очередь: ${summary}.`, components: [] });
+    await musicPlayer.enqueue(voiceChannel, [track]);
+    await interaction.editReply({
+      content: `Добавил в очередь: **${track.title}** — ${track.artists}.`,
+      components: [],
+    });
   },
 };
