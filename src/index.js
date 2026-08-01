@@ -6,7 +6,6 @@ const steamGames = require('./services/steamGames');
 const guildConfig = require('./services/guildConfig');
 const roster = require('./services/roster');
 const auraPicker = require('./services/auraPicker');
-const auraColorPicker = require('./services/auraColorPicker');
 const verification = require('./services/verification');
 const musicPlayer = require('./services/musicPlayer');
 const musicPanel = require('./services/musicPanel');
@@ -41,13 +40,6 @@ client.once('clientReady', async () => {
       console.error(`Не удалось загрузить участников гильдии ${guild.name}:`, error);
     }
   }
-
-  // Не блокирует остальной старт — если создание emoji-образцов затянется,
-  // /add-aura просто покажет варианты без цветного превью до её завершения.
-  auraColorPicker
-    .warmupSwatchEmojis(client)
-    .then(() => console.log('Эмодзи-образцы цвета для /add-aura готовы.'))
-    .catch((error) => console.error('Не удалось подготовить эмодзи-образцы цвета:', error));
 });
 
 client.on('guildMemberAdd', async (member) => {
@@ -115,24 +107,6 @@ client.on('interactionCreate', async (interaction) => {
       await auraPicker.handleSelect(interaction);
     } catch (error) {
       console.error('Не удалось обработать выбор ауры:', error);
-    }
-    return;
-  }
-
-  if (interaction.isStringSelectMenu() && interaction.customId === auraColorPicker.HUE_SELECT_ID) {
-    try {
-      await auraColorPicker.handleHueSelect(interaction);
-    } catch (error) {
-      console.error('Не удалось обработать выбор оттенка ауры:', error);
-    }
-    return;
-  }
-
-  if (interaction.isStringSelectMenu() && interaction.customId.startsWith(auraColorPicker.SHADE_SELECT_PREFIX)) {
-    try {
-      await auraColorPicker.handleShadeSelect(interaction);
-    } catch (error) {
-      console.error('Не удалось обработать выбор насыщенности ауры:', error);
     }
     return;
   }
