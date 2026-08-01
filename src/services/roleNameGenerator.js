@@ -66,4 +66,32 @@ async function generateRankNames(gameName, description, levels) {
   return parsed.map((name) => sanitizeRoleName(String(name)));
 }
 
-module.exports = { generateSingleRoleName, generateRankNames };
+async function generateAuraName(colorHex, hueLabel, existingNames = []) {
+  const messages = [
+    {
+      role: 'system',
+      content:
+        'Ты придумываешь короткие атмосферные названия декоративных цветных ролей ("аур") для Discord-сервера. ' +
+        'Название должно быть на русском языке и состоять из прилагательного и слова "аура" (например "Огненная аура", ' +
+        '"Ледяная аура", "Королевская аура"), передавать настроение, стихию или образ, ассоциирующиеся с заданным цветом. ' +
+        'Не повторяй уже существующие названия. Ответь ТОЛЬКО названием роли, без кавычек и пояснений, не длиннее 4 слов.',
+    },
+    {
+      role: 'user',
+      content:
+        `Цвет: ${colorHex}${hueLabel ? ` (оттенок: ${hueLabel})` : ''}` +
+        (existingNames.length ? `\nУже существующие названия (не повторять): ${existingNames.join(', ')}` : ''),
+    },
+  ];
+
+  try {
+    const raw = await groq.chat(messages);
+    const cleaned = sanitizeRoleName(raw);
+    return cleaned || `${hueLabel || 'Цветная'} аура`;
+  } catch (error) {
+    console.error(`Не удалось сгенерировать название ауры для ${colorHex}:`, error);
+    return `${hueLabel || 'Цветная'} аура`;
+  }
+}
+
+module.exports = { generateSingleRoleName, generateRankNames, generateAuraName };
