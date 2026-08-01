@@ -1,5 +1,6 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, MessageFlags } = require('discord.js');
 const guildConfig = require('./guildConfig');
+const { deleteChannelMessage } = require('../utils/channelCleanup');
 
 const ACCEPT_CUSTOM_ID = 'verify-accept';
 const UNVERIFIED_ROLE_NAME = 'Не верифицирован';
@@ -61,6 +62,10 @@ function buildAcceptRow() {
 async function setup(guild, gateChannelId, rulesChannelId, rulesText) {
   const role = await ensureUnverifiedRole(guild);
 
+  const oldRulesChannelId = guildConfig.getRulesChannelId(guild.id);
+  const oldRulesMessageId = guildConfig.getRulesMessageId(guild.id);
+  await deleteChannelMessage(guild, oldRulesChannelId, oldRulesMessageId);
+
   guildConfig.setGateChannel(guild.id, gateChannelId);
   guildConfig.setRulesChannel(guild.id, rulesChannelId);
   guildConfig.setRulesText(guild.id, rulesText);
@@ -117,6 +122,20 @@ async function assignUnverified(member) {
 
 async function handleAccept(interaction) {
   const member = interaction.member;
+  const roleId = guildConfig.getUnverifiedRoleId(interaction.guild.id);
+
+  // Кнопка "Принимаю" физически остаётся в сообщении для всех — Discord не
+  // умеет прятать компоненты по конкретному зрителю. Для тех, кто уже
+  // верифицирован (роли уже нет), просто тихо сообщаем об этом вместо
+  // повторной попытки снять роль/продублировать nudge в welcome-канал.
+  if (!roleId || !member.roles.cache.has(roleId)) {
+    await interaction.reply({
+      content: 'Ты уже верифицирован(а) — доступ к серверу уже открыт.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
   const key = `${interaction.guild.id}:${member.id}`;
 
   if (processingAccept.has(key)) {
@@ -126,27 +145,22 @@ async function handleAccept(interaction) {
   processingAccept.add(key);
 
   try {
-    const roleId = guildConfig.getUnverifiedRoleId(interaction.guild.id);
+    await member.roles
+      .remove(roleId)
+      .catch((error) => console.error('Не удалось снять роль "не верифицирован":', error));
 
-    if (roleId && member.roles.cache.has(roleId)) {
-      await member.roles
-        .remove(roleId)
-        .catch((error) => console.error('Не удалось снять роль "не верифицирован":', error));
-
-      const welcomeChannelId = guildConfig.getWelcomeChannelId(interaction.guild.id);
-      const welcomeChannel = welcomeChannelId
-        ? await interaction.guild.channels.fetch(welcomeChannelId).catch(() => null)
-        : null;
-
-      if (welcomeChannel) {
-        await welcomeChannel.send(
-          `${member}, расскажи, во что любишь играть, и получи тематическую роль на сервере.\n\n` +
-            'Введи команду **/fav-game** и выбери одну или несколько своих любимых игр — я сам подберу роль.',
-        );
-      }
-    }
-
-    await interaction.reply({ content: 'Добро пожаловать! Доступ к серверу открыт.', flags: MessageFlags.Ephemeral });
+    // Раньше nudge про /fav-game публично уходил в отдельный welcome-канал —
+    // пользователь решил, что этот канал должен оставаться местом для
+    // приветственных карточек, а не технических инструкций, видимых всем.
+    // Теперь nudge — часть того же эфемерного ответа на клик, что и
+    // подтверждение доступа: виден только самому участнику, не DM.
+    await interaction.reply({
+      content:
+        'Добро пожаловать! Доступ к серверу открыт.\n\n' +
+        'Расскажи, во что любишь играть, и получи тематическую роль — введи команду **/fav-game** и выбери одну ' +
+        'или несколько своих любимых игр, я сам подберу роль.',
+      flags: MessageFlags.Ephemeral,
+    });
   } finally {
     processingAccept.delete(key);
   }

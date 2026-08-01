@@ -16,17 +16,6 @@ function saveStore(store) {
   fs.writeFileSync(DATA_PATH, JSON.stringify(store, null, 2));
 }
 
-function setWelcomeChannel(guildId, channelId) {
-  const store = loadStore();
-  store[guildId] = { ...store[guildId], welcomeChannelId: channelId };
-  saveStore(store);
-}
-
-function getWelcomeChannelId(guildId) {
-  const store = loadStore();
-  return store[guildId]?.welcomeChannelId ?? null;
-}
-
 function setRosterChannel(guildId, channelId) {
   const store = loadStore();
   store[guildId] = { ...store[guildId], rosterChannelId: channelId, rosterMessageId: null };
@@ -127,8 +116,6 @@ function getUnverifiedRoleId(guildId) {
 }
 
 module.exports = {
-  setWelcomeChannel,
-  getWelcomeChannelId,
   setRosterChannel,
   getRosterChannelId,
   setRosterMessageId,
