@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits, ChannelType, MessageFlags } = require('discord.js');
 const guildConfig = require('../services/guildConfig');
 const auraPicker = require('../services/auraPicker');
+const { deleteChannelMessage } = require('../utils/channelCleanup');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -16,9 +17,14 @@ module.exports = {
     ),
   async execute(interaction) {
     const channel = interaction.options.getChannel('channel');
-    guildConfig.setAuraChannel(interaction.guild.id, channel.id);
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const oldChannelId = guildConfig.getAuraChannelId(interaction.guild.id);
+    const oldMessageId = guildConfig.getAuraMessageId(interaction.guild.id);
+    await deleteChannelMessage(interaction.guild, oldChannelId, oldMessageId);
+
+    guildConfig.setAuraChannel(interaction.guild.id, channel.id);
     await auraPicker.publish(interaction.guild);
 
     await interaction.editReply(`Готово! Список аур теперь в ${channel}.`);
