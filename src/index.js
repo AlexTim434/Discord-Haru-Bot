@@ -7,11 +7,20 @@ const guildConfig = require('./services/guildConfig');
 const roster = require('./services/roster');
 const auraPicker = require('./services/auraPicker');
 const verification = require('./services/verification');
-const music = require('./commands/music');
+const musicPlayer = require('./services/musicPlayer');
+const musicPanel = require('./services/musicPanel');
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildVoiceStates],
 });
+
+musicPlayer.setOnUpdate((guild) =>
+  musicPanel.refresh(guild).catch((error) => console.error('Не удалось обновить панель музыки:', error)),
+);
+
+// Без этого обработчика необработанная ошибка на клиенте (например протухшая
+// интеракция) роняет весь процесс — см. инцидент 2026-08-01 в CLAUDE.md.
+client.on('error', (error) => console.error('Ошибка клиента Discord:', error));
 
 client.commands = new Collection();
 const commandsPath = path.join(__dirname, 'commands');
@@ -84,11 +93,11 @@ client.on('roleUpdate', async (oldRole, newRole) => {
 });
 
 client.on('interactionCreate', async (interaction) => {
-  if (interaction.isStringSelectMenu() && interaction.customId.startsWith(music.SEARCH_SELECT_ID)) {
+  if (interaction.isButton() && interaction.customId.startsWith(musicPanel.PREFIX)) {
     try {
-      await music.handleSearchSelect(interaction);
+      await musicPanel.handleButtonClick(interaction);
     } catch (error) {
-      console.error('Не удалось обработать выбор из поиска музыки:', error);
+      console.error('Не удалось обработать кнопку панели музыки:', error);
     }
     return;
   }
@@ -150,10 +159,14 @@ client.on('interactionCreate', async (interaction) => {
   } catch (error) {
     console.error(error);
     const reply = { content: 'Произошла ошибка при выполнении команды.', flags: MessageFlags.Ephemeral };
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp(reply);
-    } else {
-      await interaction.reply(reply);
+    try {
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp(reply);
+      } else {
+        await interaction.reply(reply);
+      }
+    } catch (replyError) {
+      console.error('Не удалось отправить сообщение об ошибке (интеракция протухла?):', replyError);
     }
   }
 });

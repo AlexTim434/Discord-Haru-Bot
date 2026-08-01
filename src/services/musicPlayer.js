@@ -11,19 +11,60 @@ const {
 } = require('@discordjs/voice');
 const youtubeMusic = require('./youtubeMusic');
 
-// guildId -> { connection, player, queue: Track[], current: Track|null, radio: {seedId, originalSeedId}|null }
+const MAX_HISTORY = 20;
+
+// guildId -> { connection, player, guild, resource, queue: Track[], current: Track|null,
+//   history: Track[], radio: {seedId, originalSeedId}|null, volume, loopMode, autoplayEnabled,
+//   nextFromHistory, forceAdvance, panelChannelId, panelMessageId,
+//   lastTrack: Track|null, endReason: 'skip'|'stop'|'ended'|null,
+//   endActorId: string|null (кто нажал skip/stop), pendingActorId: string|null,
+//   sessionId: number (растёт на каждый новый запуск с нуля — play/radio,
+//   когда до этого ничего не играло), panelSessionId: number|null (какой
+//   сессии принадлежит текущее сообщение-панель) }
 const states = new Map();
+
+let onUpdate = () => {};
+
+function setOnUpdate(callback) {
+  onUpdate = callback;
+}
+
+function notify(guild) {
+  if (guild) onUpdate(guild);
+}
 
 function getState(guildId) {
   let state = states.get(guildId);
   if (!state) {
-    state = { connection: null, player: null, queue: [], current: null, radio: null };
+    state = {
+      connection: null,
+      player: null,
+      guild: null,
+      resource: null,
+      queue: [],
+      current: null,
+      history: [],
+      radio: null,
+      volume: 1,
+      loopMode: 'off',
+      autoplayEnabled: false,
+      nextFromHistory: false,
+      forceAdvance: false,
+      panelChannelId: null,
+      panelMessageId: null,
+      lastTrack: null,
+      endReason: null,
+      endActorId: null,
+      pendingActorId: null,
+      sessionId: 0,
+      panelSessionId: null,
+    };
     states.set(guildId, state);
   }
   return state;
 }
 
-function spawnFfmpegResource(streamUrl) {
+function spawnFfmpegResource(streamUrl, volume) {
   const ffmpeg = spawn(ffmpegPath, [
     '-i', streamUrl,
     '-analyzeduration', '0',
@@ -34,39 +75,68 @@ function spawnFfmpegResource(streamUrl) {
     'pipe:1',
   ]);
   ffmpeg.on('error', (error) => console.error('Ошибка ffmpeg:', error));
-  const resource = createAudioResource(ffmpeg.stdout, { inputType: StreamType.Raw });
+  const resource = createAudioResource(ffmpeg.stdout, { inputType: StreamType.Raw, inlineVolume: true });
+  resource.volume.setVolume(volume);
   resource.playStream.once('close', () => ffmpeg.kill('SIGKILL'));
   return resource;
 }
 
-async function playNext(guildId) {
+async function playTrack(guildId, track) {
+  const state = getState(guildId);
+  state.current = track;
+  const streamUrl = await youtubeMusic.getStreamUrl(track.id).catch((error) => {
+    console.error(`Не удалось получить ссылку на трек "${track.title}":`, error);
+    return null;
+  });
+
+  if (!streamUrl) {
+    await playNext(guildId, { forceAdvance: true });
+    return;
+  }
+
+  const resource = spawnFfmpegResource(streamUrl, state.volume);
+  state.resource = resource;
+  state.player.play(resource);
+  notify(state.guild);
+}
+
+async function playNext(guildId, { fromHistory = false, forceAdvance = false } = {}) {
   const state = getState(guildId);
   if (!state.player) return;
+
+  if (state.loopMode === 'track' && state.current && !fromHistory && !forceAdvance) {
+    await playTrack(guildId, state.current);
+    return;
+  }
 
   if (!state.queue.length && state.radio) {
     const { seedId, tracks } = await youtubeMusic.continueRadio(state.radio.seedId, state.radio.originalSeedId);
     state.radio.seedId = seedId;
     state.queue.push(...tracks);
+  } else if (!state.queue.length && state.autoplayEnabled && state.current) {
+    const radio = await youtubeMusic.startRadio(state.current.id);
+    state.radio = { seedId: radio.seedId, originalSeedId: radio.seedId };
+    state.queue.push(...radio.tracks);
   }
 
   const next = state.queue.shift();
   if (!next) {
+    state.lastTrack = state.current;
+    state.endReason = forceAdvance ? 'skip' : 'ended';
+    state.endActorId = forceAdvance ? state.pendingActorId : null;
+    state.pendingActorId = null;
     state.current = null;
+    notify(state.guild);
     return;
   }
 
-  state.current = next;
-  const streamUrl = await youtubeMusic.getStreamUrl(next.id).catch((error) => {
-    console.error(`Не удалось получить ссылку на трек "${next.title}":`, error);
-    return null;
-  });
-
-  if (!streamUrl) {
-    await playNext(guildId);
-    return;
+  if (state.current && !fromHistory) {
+    state.history.push(state.current);
+    if (state.history.length > MAX_HISTORY) state.history.shift();
+    if (state.loopMode === 'queue') state.queue.push(state.current);
   }
 
-  state.player.play(spawnFfmpegResource(streamUrl));
+  await playTrack(guildId, next);
 }
 
 function ensurePlayer(guildId) {
@@ -74,7 +144,13 @@ function ensurePlayer(guildId) {
   if (!state.player) {
     state.player = createAudioPlayer();
     state.player.on(AudioPlayerStatus.Idle, () => {
-      playNext(guildId).catch((error) => console.error('Не удалось запустить следующий трек:', error));
+      const fromHistory = state.nextFromHistory;
+      const forceAdvance = state.forceAdvance;
+      state.nextFromHistory = false;
+      state.forceAdvance = false;
+      playNext(guildId, { fromHistory, forceAdvance }).catch((error) =>
+        console.error('Не удалось запустить следующий трек:', error),
+      );
     });
     state.player.on('error', (error) => console.error('Ошибка аудиоплеера:', error));
   }
@@ -83,6 +159,7 @@ function ensurePlayer(guildId) {
 
 async function connect(voiceChannel) {
   const state = getState(voiceChannel.guild.id);
+  state.guild = voiceChannel.guild;
   const player = ensurePlayer(voiceChannel.guild.id);
 
   if (!state.connection) {
@@ -99,49 +176,206 @@ async function connect(voiceChannel) {
   return state.connection;
 }
 
-async function enqueue(voiceChannel, tracks) {
+async function enqueue(voiceChannel, tracks, requestedBy) {
   await connect(voiceChannel);
   const state = getState(voiceChannel.guild.id);
-  state.queue.push(...tracks);
-  if (!state.current) await playNext(voiceChannel.guild.id);
+  state.queue.push(...tracks.map((t) => ({ ...t, requestedBy })));
+  if (!state.current) {
+    state.sessionId += 1;
+    await playNext(voiceChannel.guild.id);
+  } else {
+    notify(state.guild);
+  }
 }
 
-async function playRadio(voiceChannel, { seedId, originalSeedId, tracks }) {
+async function playRadio(voiceChannel, { seedId, originalSeedId, tracks }, requestedBy) {
+  const guildId = voiceChannel.guild.id;
+  const state = getState(guildId);
+
+  // Радио — самостоятельная сессия, а не продолжение текущей очереди: то,
+  // что уже играло (из /music play или /music search), считается
+  // остановленным (со своим уведомлением на старой панели), а не дополненным.
+  if (state.current) stop(guildId, requestedBy);
+
   await connect(voiceChannel);
-  const state = getState(voiceChannel.guild.id);
   state.radio = { seedId, originalSeedId };
-  state.queue.push(...tracks);
-  if (!state.current) await playNext(voiceChannel.guild.id);
+  state.autoplayEnabled = true;
+  state.queue.push(...tracks.map((t) => ({ ...t, requestedBy })));
+  state.sessionId += 1;
+  await playNext(guildId);
 }
 
-function skip(guildId) {
+// Как playRadio — самостоятельная сессия, перехватывающая то, что играло
+// раньше (со своим уведомлением на старой панели), а не дополняющая очередь.
+// Для команд вида "включить конкретный трек прямо сейчас" (/trendkill).
+async function playNow(voiceChannel, track, requestedBy) {
+  const guildId = voiceChannel.guild.id;
+  const state = getState(guildId);
+
+  if (state.current) stop(guildId, requestedBy);
+
+  await connect(voiceChannel);
+  state.queue.push({ ...track, requestedBy });
+  state.sessionId += 1;
+  await playNext(guildId);
+}
+
+function setLoopMode(guildId, mode) {
+  const state = getState(guildId);
+  state.loopMode = mode;
+  notify(state.guild);
+  return state.loopMode;
+}
+
+function back(guildId) {
+  const state = getState(guildId);
+  if (!state.history.length || !state.current) return false;
+  const prevTrack = state.history.pop();
+  state.queue.unshift(state.current);
+  state.queue.unshift(prevTrack);
+  state.nextFromHistory = true;
+  state.player?.stop();
+  return true;
+}
+
+function skip(guildId, actorId) {
   const state = getState(guildId);
   if (!state.current) return false;
+  state.forceAdvance = true;
+  state.pendingActorId = actorId ?? null;
   state.player?.stop();
   return true;
 }
 
 function pause(guildId) {
-  return getState(guildId).player?.pause() ?? false;
+  const state = getState(guildId);
+  const ok = state.player?.pause() ?? false;
+  if (ok) notify(state.guild);
+  return ok;
 }
 
 function resume(guildId) {
-  return getState(guildId).player?.unpause() ?? false;
+  const state = getState(guildId);
+  const ok = state.player?.unpause() ?? false;
+  if (ok) notify(state.guild);
+  return ok;
 }
 
-function stop(guildId) {
+function stop(guildId, actorId) {
   const state = getState(guildId);
+  if (state.current) {
+    state.lastTrack = state.current;
+    state.endReason = 'stop';
+    state.endActorId = actorId ?? null;
+  }
   state.queue = [];
+  state.history = [];
   state.radio = null;
+  state.autoplayEnabled = false;
   state.current = null;
-  state.player?.stop();
+  // Снимаем слушатель Idle ДО stop() — иначе отложенное событие Idle само
+  // вызовет playNext и затрёт lastTrack/endReason, которые мы только что
+  // выставили, значением по умолчанию ("ended", без lastTrack).
+  if (state.player) {
+    state.player.removeAllListeners(AudioPlayerStatus.Idle);
+    state.player.stop();
+  }
+  state.player = null;
   state.connection?.destroy();
   state.connection = null;
+  notify(state.guild);
 }
 
-function getQueue(guildId) {
+function shuffleQueue(guildId) {
   const state = getState(guildId);
-  return { current: state.current, upcoming: [...state.queue], radioActive: Boolean(state.radio) };
+  for (let i = state.queue.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [state.queue[i], state.queue[j]] = [state.queue[j], state.queue[i]];
+  }
+  notify(state.guild);
+  return state.queue.length;
 }
 
-module.exports = { connect, enqueue, playRadio, skip, pause, resume, stop, getQueue };
+function setVolume(guildId, value) {
+  const state = getState(guildId);
+  state.volume = Math.max(0, Math.min(2, value));
+  state.resource?.volume?.setVolume(state.volume);
+  notify(state.guild);
+  return state.volume;
+}
+
+function adjustVolume(guildId, delta) {
+  const state = getState(guildId);
+  return setVolume(guildId, state.volume + delta);
+}
+
+function toggleLoop(guildId) {
+  const state = getState(guildId);
+  const order = ['off', 'track', 'queue'];
+  state.loopMode = order[(order.indexOf(state.loopMode) + 1) % order.length];
+  notify(state.guild);
+  return state.loopMode;
+}
+
+function toggleAutoplay(guildId) {
+  const state = getState(guildId);
+  state.autoplayEnabled = !state.autoplayEnabled;
+  if (!state.autoplayEnabled) state.radio = null;
+  notify(state.guild);
+  return state.autoplayEnabled;
+}
+
+function getPlayerStatusLabel(state) {
+  if (!state.current) return '⏹ Stopped';
+  if (state.player?.state?.status === AudioPlayerStatus.Paused) return '⏸ Paused';
+  return '▶ Playing';
+}
+
+function getPanelState(guildId) {
+  const state = getState(guildId);
+  return {
+    current: state.current,
+    queue: [...state.queue],
+    guild: state.guild,
+    loopMode: state.loopMode,
+    volume: state.volume,
+    autoplayEnabled: state.autoplayEnabled,
+    radioActive: Boolean(state.radio),
+    playerStatusLabel: getPlayerStatusLabel(state),
+    panelChannelId: state.panelChannelId,
+    panelMessageId: state.panelMessageId,
+    lastTrack: state.lastTrack,
+    endReason: state.endReason,
+    endActorId: state.endActorId,
+    sessionId: state.sessionId,
+    panelSessionId: state.panelSessionId,
+  };
+}
+
+function setPanelLocation(guildId, channelId, messageId) {
+  const state = getState(guildId);
+  state.panelChannelId = channelId;
+  state.panelMessageId = messageId;
+  state.panelSessionId = state.sessionId;
+}
+
+module.exports = {
+  connect,
+  enqueue,
+  playRadio,
+  playNow,
+  setLoopMode,
+  back,
+  skip,
+  pause,
+  resume,
+  stop,
+  shuffleQueue,
+  setVolume,
+  adjustVolume,
+  toggleLoop,
+  toggleAutoplay,
+  getPanelState,
+  setPanelLocation,
+  setOnUpdate,
+};

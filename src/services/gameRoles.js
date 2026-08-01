@@ -73,4 +73,17 @@ function listAll() {
   return loadStore();
 }
 
-module.exports = { getOrCreateRole, removeGenericRole, listAll };
+// Есть ли у участника роль за игру gameName — не создаёт роль, если её ещё
+// не было (значит игру ещё никто не выбирал, доступа ни у кого нет).
+function hasGameRole(member, gameName) {
+  const ladder = rankGames.getRankLadder(gameName);
+  if (ladder?.roles?.length) {
+    return ladder.roles.some((r) => member.roles.cache.has(r.id));
+  }
+
+  const key = gameName.toLowerCase();
+  const roleId = loadStore()[key]?.roleId;
+  return roleId ? member.roles.cache.has(roleId) : false;
+}
+
+module.exports = { getOrCreateRole, removeGenericRole, listAll, hasGameRole };
