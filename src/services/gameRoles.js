@@ -1,0 +1,76 @@
+const fs = require('fs');
+const path = require('path');
+const steamGames = require('./steamGames');
+const steamDetails = require('./steamDetails');
+const roleNameGenerator = require('./roleNameGenerator');
+const rankGames = require('./rankGames');
+
+const DATA_PATH = path.join(__dirname, '..', '..', 'data', 'gameRoles.json');
+
+function loadStore() {
+  try {
+    return JSON.parse(fs.readFileSync(DATA_PATH, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveStore(store) {
+  fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
+  fs.writeFileSync(DATA_PATH, JSON.stringify(store, null, 2));
+}
+
+async function getOrCreateRole(guild, gameName) {
+  const rankLadder = rankGames.getRankLadder(gameName);
+  if (rankLadder?.roles?.length) {
+    const lowestRank = rankLadder.roles[0];
+    const existingRankRole = guild.roles.cache.get(lowestRank.id);
+    if (existingRankRole) return existingRankRole;
+  }
+
+  const key = gameName.toLowerCase();
+  const store = loadStore();
+  const cached = store[key];
+
+  if (cached) {
+    const existingRole = guild.roles.cache.get(cached.roleId);
+    if (existingRole) return existingRole;
+  }
+
+  const appid = steamGames.getAppId(gameName);
+  const description = appid ? await steamDetails.fetchShortDescription(appid) : null;
+  const roleName = await roleNameGenerator.generateSingleRoleName(gameName, description);
+
+  const role = await guild.roles.create({
+    name: roleName,
+    permissions: [],
+    mentionable: false,
+    reason: `Авто-роль за любимую игру: ${gameName}`,
+  });
+
+  store[key] = { roleId: role.id, roleName: role.name, gameName };
+  saveStore(store);
+
+  return role;
+}
+
+async function removeGenericRole(guild, gameName) {
+  const key = gameName.toLowerCase();
+  const store = loadStore();
+  const cached = store[key];
+  if (!cached) return;
+
+  const role = guild.roles.cache.get(cached.roleId);
+  if (role) {
+    await role.delete(`Заменено ранговой системой для игры: ${gameName}`);
+  }
+
+  delete store[key];
+  saveStore(store);
+}
+
+function listAll() {
+  return loadStore();
+}
+
+module.exports = { getOrCreateRole, removeGenericRole, listAll };
