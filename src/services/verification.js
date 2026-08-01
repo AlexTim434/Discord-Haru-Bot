@@ -46,7 +46,11 @@ async function allowChannel(channel, roleId) {
 }
 
 function buildRulesEmbed(rulesText) {
-  return new EmbedBuilder().setColor(0x5865f2).setTitle('Правила сервера').setDescription(rulesText).setTimestamp();
+  const description = `${rulesText}\n\nПрочитал(а)? Нажми **Принимаю** ниже, чтобы получить доступ к серверу.`.slice(
+    0,
+    4096,
+  );
+  return new EmbedBuilder().setColor(0x5865f2).setTitle('Правила сервера').setDescription(description).setTimestamp();
 }
 
 function buildAcceptRow() {

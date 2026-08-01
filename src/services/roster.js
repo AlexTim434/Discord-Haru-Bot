@@ -34,17 +34,17 @@ function buildRosterEmbed(guild) {
       const role = guild.roles.cache.get(roleId);
       if (!role) continue;
       for (const member of role.members.values()) {
-        lines.push(`• ${member} — ${role.name}`);
+        lines.push(`- ${member} — ${role.name}`);
       }
     }
     if (lines.length) {
-      sections.push(`**${gameName}**\n${lines.join('\n')}`);
+      sections.push(`### ${gameName}\n${lines.join('\n')}`);
     }
   }
 
   const description = sections.length
     ? sections.join('\n\n').slice(0, 4096)
-    : 'Пока никто не выбрал любимую игру - используйте /favgame.';
+    : 'Пока никто не выбрал любимую игру — используй **/fav-game**.';
 
   return new EmbedBuilder()
     .setColor(0x5865f2)
