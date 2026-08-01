@@ -1,21 +1,9 @@
-const {
-  SlashCommandBuilder,
-  EmbedBuilder,
-  StringSelectMenuBuilder,
-  ActionRowBuilder,
-  MessageFlags,
-} = require('discord.js');
+const { SlashCommandBuilder, StringSelectMenuBuilder, ActionRowBuilder, MessageFlags } = require('discord.js');
 const youtubeMusic = require('../services/youtubeMusic');
 const musicPlayer = require('../services/musicPlayer');
+const musicPanel = require('../services/musicPanel');
 
 const SEARCH_SELECT_ID = 'music-search-select';
-
-function formatDuration(ms) {
-  const totalSeconds = Math.round((ms ?? 0) / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${String(seconds).padStart(2, '0')}`;
-}
 
 function requireVoiceChannel(interaction) {
   const channel = interaction.member.voice.channel;
@@ -50,62 +38,10 @@ module.exports = {
         .addStringOption((opt) =>
           opt.setName('query').setDescription('От какого трека оттолкнуться (по умолчанию — текущий)'),
         ),
-    )
-    .addSubcommand((sub) => sub.setName('skip').setDescription('Пропустить текущий трек'))
-    .addSubcommand((sub) => sub.setName('pause').setDescription('Поставить на паузу'))
-    .addSubcommand((sub) => sub.setName('resume').setDescription('Снять с паузы'))
-    .addSubcommand((sub) => sub.setName('queue').setDescription('Показать очередь'))
-    .addSubcommand((sub) => sub.setName('stop').setDescription('Остановить и выйти из канала')),
+    ),
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
-
-    if (sub === 'queue') {
-      const { current, upcoming, radioActive } = musicPlayer.getQueue(interaction.guild.id);
-      const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('Очередь');
-      const currentLine = current
-        ? `Сейчас играет: **${current.title}** — ${current.artists} (${formatDuration(current.durationMs)})`
-        : 'Сейчас ничего не играет.';
-      embed.setDescription(currentLine + (radioActive ? '\n📻 Режим радио включён' : ''));
-      if (upcoming.length) {
-        embed.addFields({
-          name: 'Дальше',
-          value: upcoming
-            .slice(0, 10)
-            .map((t, i) => `${i + 1}. ${t.title} — ${t.artists} (${formatDuration(t.durationMs)})`)
-            .join('\n'),
-        });
-      }
-      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
-      return;
-    }
-
-    if (sub === 'skip') {
-      const skipped = musicPlayer.skip(interaction.guild.id);
-      await interaction.reply({
-        content: skipped ? 'Пропускаю...' : 'Сейчас ничего не играет.',
-        flags: MessageFlags.Ephemeral,
-      });
-      return;
-    }
-
-    if (sub === 'pause') {
-      const ok = musicPlayer.pause(interaction.guild.id);
-      await interaction.reply({ content: ok ? 'Пауза.' : 'Нечего ставить на паузу.', flags: MessageFlags.Ephemeral });
-      return;
-    }
-
-    if (sub === 'resume') {
-      const ok = musicPlayer.resume(interaction.guild.id);
-      await interaction.reply({ content: ok ? 'Продолжаю.' : 'Нечего продолжать.', flags: MessageFlags.Ephemeral });
-      return;
-    }
-
-    if (sub === 'stop') {
-      musicPlayer.stop(interaction.guild.id);
-      await interaction.reply({ content: 'Остановил и вышел из канала.', flags: MessageFlags.Ephemeral });
-      return;
-    }
 
     let voiceChannel;
     try {
@@ -124,14 +60,17 @@ module.exports = {
         await interaction.editReply(`Ничего не нашёл по запросу "${query}".`);
         return;
       }
-      await musicPlayer.enqueue(voiceChannel, results);
+      await musicPlayer.enqueue(voiceChannel, results, interaction.user.id);
+      await musicPanel
+        .ensurePanel(interaction.channel, interaction.guild)
+        .catch((error) => console.error('Не удалось обновить панель музыки:', error));
       await interaction.editReply(`Добавил в очередь: **${results[0].title}** — ${results[0].artists}`);
       return;
     }
 
     if (sub === 'radio') {
       const query = interaction.options.getString('query');
-      let seedId = query ? null : musicPlayer.getQueue(interaction.guild.id).current?.id;
+      let seedId = query ? null : musicPlayer.getPanelState(interaction.guild.id).current?.id;
 
       if (query) {
         const results = await youtubeMusic.searchTracks(query, 1);
@@ -154,7 +93,10 @@ module.exports = {
         await interaction.editReply('Не удалось найти похожие треки для этого трека.');
         return;
       }
-      await musicPlayer.playRadio(voiceChannel, radio);
+      await musicPlayer.playRadio(voiceChannel, radio, interaction.user.id);
+      await musicPanel
+        .ensurePanel(interaction.channel, interaction.guild)
+        .catch((error) => console.error('Не удалось обновить панель музыки:', error));
       await interaction.editReply('Включил похожие треки 📻');
       return;
     }
@@ -208,7 +150,10 @@ module.exports = {
       return;
     }
 
-    await musicPlayer.enqueue(voiceChannel, [track]);
+    await musicPlayer.enqueue(voiceChannel, [track], interaction.user.id);
+    await musicPanel
+      .ensurePanel(interaction.channel, interaction.guild)
+      .catch((error) => console.error('Не удалось обновить панель музыки:', error));
     await interaction.editReply({
       content: `Добавил в очередь: **${track.title}** — ${track.artists}.`,
       components: [],
