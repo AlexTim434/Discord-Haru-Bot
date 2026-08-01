@@ -7,7 +7,6 @@ const guildConfig = require('./services/guildConfig');
 const roster = require('./services/roster');
 const auraPicker = require('./services/auraPicker');
 const verification = require('./services/verification');
-const music = require('./commands/music');
 const musicPlayer = require('./services/musicPlayer');
 const musicPanel = require('./services/musicPanel');
 
@@ -99,15 +98,6 @@ client.on('interactionCreate', async (interaction) => {
       await musicPanel.handleButtonClick(interaction);
     } catch (error) {
       console.error('Не удалось обработать кнопку панели музыки:', error);
-    }
-    return;
-  }
-
-  if (interaction.isStringSelectMenu() && interaction.customId.startsWith(music.SEARCH_SELECT_ID)) {
-    try {
-      await music.handleSearchSelect(interaction);
-    } catch (error) {
-      console.error('Не удалось обработать выбор из поиска музыки:', error);
     }
     return;
   }

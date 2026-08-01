@@ -1,44 +1,82 @@
-const { SlashCommandBuilder, StringSelectMenuBuilder, ActionRowBuilder, MessageFlags } = require('discord.js');
+const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 const youtubeMusic = require('../services/youtubeMusic');
 const musicPlayer = require('../services/musicPlayer');
 const musicPanel = require('../services/musicPanel');
+const { toSmallCaps } = require('../utils/smallCaps');
 
-const SEARCH_SELECT_ID = 'music-search-select';
+const AUTOCOMPLETE_TIMEOUT_MS = 2500;
+// Autocomplete отдаёт videoId как value выбранного варианта; если пользователь
+// напечатал текст и отправил без выбора из списка, это не пройдёт под этот
+// формат — тогда ищем по тексту как раньше. Без этой проверки на каждый
+// свободный текстовый запрос уходил бы лишний (заведомо провальный) вызов
+// yt-dlp за videoId, прежде чем откатиться на текстовый поиск.
+const YOUTUBE_ID_RE = /^[\w-]{11}$/;
 
 function requireVoiceChannel(interaction) {
   const channel = interaction.member.voice.channel;
   if (!channel) {
-    throw new Error('Зайди в голосовой канал, чтобы использовать музыкальные команды.');
+    throw new Error(`${toSmallCaps('Join a voice channel')} to use music commands.`);
   }
   return channel;
 }
 
-module.exports = {
-  SEARCH_SELECT_ID,
+async function resolveTrack(query) {
+  if (YOUTUBE_ID_RE.test(query)) {
+    const track = await youtubeMusic.getTrackById(query).catch(() => null);
+    if (track) return track;
+  }
+  const [track] = await youtubeMusic.searchTracks(query, 1);
+  return track ?? null;
+}
 
+module.exports = {
   data: new SlashCommandBuilder()
     .setName('music')
-    .setDescription('Музыка из YouTube Music в голосовом канале')
+    .setDescription('Music from YouTube Music in a voice channel')
     .addSubcommand((sub) =>
       sub
         .setName('play')
-        .setDescription('Найти и включить трек')
-        .addStringOption((opt) => opt.setName('query').setDescription('Название трека').setRequired(true)),
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('search')
-        .setDescription('Поиск с выбором из списка')
-        .addStringOption((opt) => opt.setName('query').setDescription('Что искать').setRequired(true)),
+        .setDescription('Search and play a track')
+        .addStringOption((opt) =>
+          opt.setName('query').setDescription('Track name').setRequired(true).setAutocomplete(true),
+        ),
     )
     .addSubcommand((sub) =>
       sub
         .setName('radio')
-        .setDescription('Включить похожие треки (YouTube Mix)')
+        .setDescription('Play similar tracks (YouTube Mix)')
         .addStringOption((opt) =>
-          opt.setName('query').setDescription('От какого трека оттолкнуться (по умолчанию — текущий)'),
+          opt.setName('query').setDescription('Track to seed from (defaults to the current one)'),
         ),
     ),
+
+  // Живой поиск по мере ввода, как у /fav-game со Steam-каталогом — только
+  // здесь каждый запрос идёт наружу через yt-dlp, а не по локальному кэшу,
+  // поэтому оборачиваем в таймаут: сеть у пользователя иногда скачет (см.
+  // инцидент 2026-08-01 в CLAUDE.md), а на автокомплит Discord даёт ~3с.
+  // Лучше пустой список, чем протухшая интеракция.
+  async autocomplete(interaction) {
+    const focused = interaction.options.getFocused();
+    if (!focused || focused.trim().length < 2) {
+      await interaction.respond([]).catch(() => {});
+      return;
+    }
+
+    try {
+      const results = await Promise.race([
+        youtubeMusic.searchTracks(focused, 10),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('autocomplete timeout')), AUTOCOMPLETE_TIMEOUT_MS)),
+      ]);
+      const choices = results.map((t) => ({
+        name: `${t.title} — ${t.artists}`.slice(0, 100),
+        value: t.id,
+      }));
+      await interaction.respond(choices);
+    } catch (error) {
+      console.error('Не удалось выполнить автодополнение поиска музыки:', error);
+      await interaction.respond([]).catch(() => {});
+    }
+  },
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
@@ -55,16 +93,18 @@ module.exports = {
 
     if (sub === 'play') {
       const query = interaction.options.getString('query');
-      const results = await youtubeMusic.searchTracks(query, 1);
-      if (!results.length) {
-        await interaction.editReply(`Ничего не нашёл по запросу "${query}".`);
+      const track = await resolveTrack(query);
+
+      if (!track) {
+        await interaction.editReply(`${toSmallCaps('Not found')} — nothing matches "${query}".`);
         return;
       }
-      await musicPlayer.enqueue(voiceChannel, results, interaction.user.id);
+
+      await musicPlayer.enqueue(voiceChannel, [track], interaction.user.id);
       await musicPanel
         .ensurePanel(interaction.channel, interaction.guild)
         .catch((error) => console.error('Не удалось обновить панель музыки:', error));
-      await interaction.editReply(`Добавил в очередь: **${results[0].title}** — ${results[0].artists}`);
+      await interaction.deleteReply().catch(() => {});
       return;
     }
 
@@ -75,7 +115,7 @@ module.exports = {
       if (query) {
         const results = await youtubeMusic.searchTracks(query, 1);
         if (!results.length) {
-          await interaction.editReply(`Ничего не нашёл по запросу "${query}".`);
+          await interaction.editReply(`${toSmallCaps('Not found')} — nothing matches "${query}".`);
           return;
         }
         seedId = results[0].id;
@@ -83,80 +123,22 @@ module.exports = {
 
       if (!seedId) {
         await interaction.editReply(
-          'Укажи query, от какого трека оттолкнуться, либо сначала запусти что-нибудь через /music play.',
+          `${toSmallCaps('No seed track')} — provide a query or start something with /music play first.`,
         );
         return;
       }
 
       const radio = await youtubeMusic.startRadio(seedId);
       if (!radio.tracks.length) {
-        await interaction.editReply('Не удалось найти похожие треки для этого трека.');
+        await interaction.editReply(`${toSmallCaps('No similar tracks found')}.`);
         return;
       }
       await musicPlayer.playRadio(voiceChannel, radio, interaction.user.id);
       await musicPanel
         .ensurePanel(interaction.channel, interaction.guild)
         .catch((error) => console.error('Не удалось обновить панель музыки:', error));
-      await interaction.editReply('Включил похожие треки 📻');
+      await interaction.deleteReply().catch(() => {});
       return;
     }
-
-    if (sub === 'search') {
-      const query = interaction.options.getString('query');
-      const tracks = await youtubeMusic.searchTracks(query);
-      const options = tracks.map((t) => ({
-        label: t.title.slice(0, 100),
-        description: t.artists.slice(0, 100),
-        value: `track:${t.id}`,
-      }));
-
-      if (!options.length) {
-        await interaction.editReply(`Ничего не нашёл по запросу "${query}".`);
-        return;
-      }
-
-      const select = new StringSelectMenuBuilder()
-        .setCustomId(`${SEARCH_SELECT_ID}:${interaction.user.id}:${voiceChannel.id}`)
-        .setPlaceholder('Выбери, что включить')
-        .addOptions(options);
-
-      await interaction.editReply({
-        content: 'Выбери из списка:',
-        components: [new ActionRowBuilder().addComponents(select)],
-      });
-    }
-  },
-
-  async handleSearchSelect(interaction) {
-    const [, expectedUserId, voiceChannelId] = interaction.customId.split(':');
-    if (interaction.user.id !== expectedUserId) {
-      await interaction.reply({ content: 'Это не твоё меню выбора.', flags: MessageFlags.Ephemeral });
-      return;
-    }
-
-    const voiceChannel = interaction.guild.channels.cache.get(voiceChannelId);
-    if (!voiceChannel) {
-      await interaction.update({ content: 'Голосовой канал недоступен, зайди в него и попробуй снова.', components: [] });
-      return;
-    }
-
-    await interaction.deferUpdate();
-
-    const [, videoId] = interaction.values[0].split(':');
-    const track = await youtubeMusic.getTrackById(videoId);
-
-    if (!track) {
-      await interaction.editReply({ content: 'Не нашёл трек для этого выбора.', components: [] });
-      return;
-    }
-
-    await musicPlayer.enqueue(voiceChannel, [track], interaction.user.id);
-    await musicPanel
-      .ensurePanel(interaction.channel, interaction.guild)
-      .catch((error) => console.error('Не удалось обновить панель музыки:', error));
-    await interaction.editReply({
-      content: `Добавил в очередь: **${track.title}** — ${track.artists}.`,
-      components: [],
-    });
   },
 };

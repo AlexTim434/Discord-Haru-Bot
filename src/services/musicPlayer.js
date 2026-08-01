@@ -15,7 +15,12 @@ const MAX_HISTORY = 20;
 
 // guildId -> { connection, player, guild, resource, queue: Track[], current: Track|null,
 //   history: Track[], radio: {seedId, originalSeedId}|null, volume, loopMode, autoplayEnabled,
-//   nextFromHistory, forceAdvance, panelChannelId, panelMessageId }
+//   nextFromHistory, forceAdvance, panelChannelId, panelMessageId,
+//   lastTrack: Track|null, endReason: 'skip'|'stop'|'ended'|null,
+//   endActorId: string|null (кто нажал skip/stop), pendingActorId: string|null,
+//   sessionId: number (растёт на каждый новый запуск с нуля — play/radio,
+//   когда до этого ничего не играло), panelSessionId: number|null (какой
+//   сессии принадлежит текущее сообщение-панель) }
 const states = new Map();
 
 let onUpdate = () => {};
@@ -47,6 +52,12 @@ function getState(guildId) {
       forceAdvance: false,
       panelChannelId: null,
       panelMessageId: null,
+      lastTrack: null,
+      endReason: null,
+      endActorId: null,
+      pendingActorId: null,
+      sessionId: 0,
+      panelSessionId: null,
     };
     states.set(guildId, state);
   }
@@ -110,6 +121,10 @@ async function playNext(guildId, { fromHistory = false, forceAdvance = false } =
 
   const next = state.queue.shift();
   if (!next) {
+    state.lastTrack = state.current;
+    state.endReason = forceAdvance ? 'skip' : 'ended';
+    state.endActorId = forceAdvance ? state.pendingActorId : null;
+    state.pendingActorId = null;
     state.current = null;
     notify(state.guild);
     return;
@@ -165,18 +180,51 @@ async function enqueue(voiceChannel, tracks, requestedBy) {
   await connect(voiceChannel);
   const state = getState(voiceChannel.guild.id);
   state.queue.push(...tracks.map((t) => ({ ...t, requestedBy })));
-  if (!state.current) await playNext(voiceChannel.guild.id);
-  else notify(state.guild);
+  if (!state.current) {
+    state.sessionId += 1;
+    await playNext(voiceChannel.guild.id);
+  } else {
+    notify(state.guild);
+  }
 }
 
 async function playRadio(voiceChannel, { seedId, originalSeedId, tracks }, requestedBy) {
+  const guildId = voiceChannel.guild.id;
+  const state = getState(guildId);
+
+  // Радио — самостоятельная сессия, а не продолжение текущей очереди: то,
+  // что уже играло (из /music play или /music search), считается
+  // остановленным (со своим уведомлением на старой панели), а не дополненным.
+  if (state.current) stop(guildId, requestedBy);
+
   await connect(voiceChannel);
-  const state = getState(voiceChannel.guild.id);
   state.radio = { seedId, originalSeedId };
   state.autoplayEnabled = true;
   state.queue.push(...tracks.map((t) => ({ ...t, requestedBy })));
-  if (!state.current) await playNext(voiceChannel.guild.id);
-  else notify(state.guild);
+  state.sessionId += 1;
+  await playNext(guildId);
+}
+
+// Как playRadio — самостоятельная сессия, перехватывающая то, что играло
+// раньше (со своим уведомлением на старой панели), а не дополняющая очередь.
+// Для команд вида "включить конкретный трек прямо сейчас" (/trendkill).
+async function playNow(voiceChannel, track, requestedBy) {
+  const guildId = voiceChannel.guild.id;
+  const state = getState(guildId);
+
+  if (state.current) stop(guildId, requestedBy);
+
+  await connect(voiceChannel);
+  state.queue.push({ ...track, requestedBy });
+  state.sessionId += 1;
+  await playNext(guildId);
+}
+
+function setLoopMode(guildId, mode) {
+  const state = getState(guildId);
+  state.loopMode = mode;
+  notify(state.guild);
+  return state.loopMode;
 }
 
 function back(guildId) {
@@ -190,10 +238,11 @@ function back(guildId) {
   return true;
 }
 
-function skip(guildId) {
+function skip(guildId, actorId) {
   const state = getState(guildId);
   if (!state.current) return false;
   state.forceAdvance = true;
+  state.pendingActorId = actorId ?? null;
   state.player?.stop();
   return true;
 }
@@ -212,14 +261,26 @@ function resume(guildId) {
   return ok;
 }
 
-function stop(guildId) {
+function stop(guildId, actorId) {
   const state = getState(guildId);
+  if (state.current) {
+    state.lastTrack = state.current;
+    state.endReason = 'stop';
+    state.endActorId = actorId ?? null;
+  }
   state.queue = [];
   state.history = [];
   state.radio = null;
   state.autoplayEnabled = false;
   state.current = null;
-  state.player?.stop();
+  // Снимаем слушатель Idle ДО stop() — иначе отложенное событие Idle само
+  // вызовет playNext и затрёт lastTrack/endReason, которые мы только что
+  // выставили, значением по умолчанию ("ended", без lastTrack).
+  if (state.player) {
+    state.player.removeAllListeners(AudioPlayerStatus.Idle);
+    state.player.stop();
+  }
+  state.player = null;
   state.connection?.destroy();
   state.connection = null;
   notify(state.guild);
@@ -265,7 +326,7 @@ function toggleAutoplay(guildId) {
 }
 
 function getPlayerStatusLabel(state) {
-  if (!state.current) return '⏹ Остановлено';
+  if (!state.current) return '⏹ Stopped';
   if (state.player?.state?.status === AudioPlayerStatus.Paused) return '⏸ Paused';
   return '▶ Playing';
 }
@@ -283,6 +344,11 @@ function getPanelState(guildId) {
     playerStatusLabel: getPlayerStatusLabel(state),
     panelChannelId: state.panelChannelId,
     panelMessageId: state.panelMessageId,
+    lastTrack: state.lastTrack,
+    endReason: state.endReason,
+    endActorId: state.endActorId,
+    sessionId: state.sessionId,
+    panelSessionId: state.panelSessionId,
   };
 }
 
@@ -290,12 +356,15 @@ function setPanelLocation(guildId, channelId, messageId) {
   const state = getState(guildId);
   state.panelChannelId = channelId;
   state.panelMessageId = messageId;
+  state.panelSessionId = state.sessionId;
 }
 
 module.exports = {
   connect,
   enqueue,
   playRadio,
+  playNow,
+  setLoopMode,
   back,
   skip,
   pause,
