@@ -26,6 +26,12 @@ async function getOrCreateRole(guild, gameName) {
     const lowestRank = rankLadder.roles[0];
     const existingRankRole = guild.roles.cache.get(lowestRank.id);
     if (existingRankRole) return existingRankRole;
+
+    // Лестница числится в данных, но её роль на сервере удалена (например,
+    // вручную во время чистки) — без очистки записи она бы вечно "затеняла"
+    // обычную роль этой игры в ростере (см. roster.js), хотя выдавать уже
+    // нечего. Забываем протухшую лестницу и идём по обычному пути ниже.
+    rankGames.removeRankLadder(gameName);
   }
 
   const key = gameName.toLowerCase();
@@ -73,6 +79,19 @@ function listAll() {
   return loadStore();
 }
 
+// Вызывается из roleDelete в index.js — когда админ удаляет обычную игровую
+// роль прямо в Discord (а не через бот-команды), запись держала бы мёртвый
+// roleId вечно.
+function forgetRole(roleId) {
+  const store = loadStore();
+  const key = Object.keys(store).find((k) => store[k].roleId === roleId);
+  if (!key) return false;
+
+  delete store[key];
+  saveStore(store);
+  return true;
+}
+
 // Есть ли у участника роль за игру gameName — не создаёт роль, если её ещё
 // не было (значит игру ещё никто не выбирал, доступа ни у кого нет).
 function hasGameRole(member, gameName) {
@@ -86,4 +105,4 @@ function hasGameRole(member, gameName) {
   return roleId ? member.roles.cache.has(roleId) : false;
 }
 
-module.exports = { getOrCreateRole, removeGenericRole, listAll, hasGameRole };
+module.exports = { getOrCreateRole, removeGenericRole, listAll, hasGameRole, forgetRole };

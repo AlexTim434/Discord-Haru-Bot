@@ -32,8 +32,38 @@ function getRankLadder(gameName) {
   return store[gameName.toLowerCase()] ?? null;
 }
 
+function removeRankLadder(gameName) {
+  const store = loadStore();
+  delete store[gameName.toLowerCase()];
+  saveStore(store);
+}
+
 function listAll() {
   return loadStore();
 }
 
-module.exports = { saveRankLadder, getRankLadder, listAll };
+// Вызывается из roleDelete в index.js — когда админ удаляет ранговую роль
+// прямо в Discord (а не через /remove-ranks), эта запись держала бы мёртвый
+// ID вечно, затеняя обычную роль игры в ростере (см. roster.js). Убирает
+// только удалённый ранг; если это был последний ранг лестницы — убирает и
+// саму лестницу.
+function forgetRole(roleId) {
+  const store = loadStore();
+  let changed = false;
+
+  for (const key of Object.keys(store)) {
+    const entry = store[key];
+    const before = entry.roles.length;
+    entry.roles = entry.roles.filter((r) => r.id !== roleId);
+    if (entry.roles.length === before) continue;
+
+    changed = true;
+    entry.levels = entry.roles.length;
+    if (!entry.roles.length) delete store[key];
+  }
+
+  if (changed) saveStore(store);
+  return changed;
+}
+
+module.exports = { saveRankLadder, getRankLadder, removeRankLadder, forgetRole, listAll };
