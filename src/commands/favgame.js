@@ -2,6 +2,7 @@ const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 const steamGames = require('../services/steamGames');
 const gameRoles = require('../services/gameRoles');
 const roster = require('../services/roster');
+const guildConfig = require('../services/guildConfig');
 
 const MAX_GAMES = 5;
 
@@ -55,6 +56,14 @@ module.exports = {
     }
 
     if (assignedRoles.length) {
+      // interaction.member.roles.add() для одиночной роли не патчит запись в
+      // guild.members.cache (возвращает независимый _clone()) — реальный кэш
+      // обновляется только по прилетающему позже gateway-событию
+      // GUILD_MEMBER_UPDATE. roster.js читает role.members из этого кэша, так
+      // что без принудительного re-fetch свежая роль может не попасть в
+      // список (особенно при нестабильной сети — см. CLAUDE.md, инцидент
+      // 2026-08-01).
+      await interaction.guild.members.fetch({ user: interaction.user.id, force: true }).catch(() => null);
       await roster.updateRoster(interaction.guild).catch((error) => console.error('Не удалось обновить ростер:', error));
     }
 
@@ -64,6 +73,13 @@ module.exports = {
     }
     if (failedGames.length) {
       lines.push(`Не получилось обработать: ${failedGames.join(', ')}`);
+    }
+
+    if (assignedRoles.length) {
+      const auraChannelId = guildConfig.getAuraChannelId(interaction.guild.id);
+      if (auraChannelId) {
+        lines.push(`Также можешь заглянуть в <#${auraChannelId}> и выбрать себе цветную роль (ауру) по вкусу.`);
+      }
     }
 
     await interaction.editReply(lines.join('\n') || 'Не указано ни одной игры.');

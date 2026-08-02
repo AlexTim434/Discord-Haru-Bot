@@ -1,7 +1,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const { Client, GatewayIntentBits, Collection, MessageFlags, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Collection, MessageFlags, EmbedBuilder, MessageType } = require('discord.js');
 const steamGames = require('./services/steamGames');
 const guildConfig = require('./services/guildConfig');
 const roster = require('./services/roster');
@@ -9,9 +9,16 @@ const auraPicker = require('./services/auraPicker');
 const verification = require('./services/verification');
 const musicPlayer = require('./services/musicPlayer');
 const musicPanel = require('./services/musicPanel');
+const gameRoles = require('./services/gameRoles');
+const rankGames = require('./services/rankGames');
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildVoiceStates],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
+  ],
 });
 
 musicPlayer.setOnUpdate((guild) =>
@@ -72,6 +79,18 @@ client.on('guildMemberAdd', async (member) => {
   await roster.updateRoster(member.guild).catch((error) => console.error('Не удалось обновить ростер:', error));
 });
 
+// Нативное сообщение Discord "участник зашёл на сервер" в системном канале —
+// убираем его, оставляя только нашу карточку из guildMemberAdd выше. Такое
+// сообщение приходит как обычный messageCreate с type=UserJoin, а не через
+// отдельное событие — требует прав Manage Messages у роли бота (Discord не
+// даёт удалять чужие сообщения без этого права, даже системные).
+client.on('messageCreate', async (message) => {
+  if (message.type !== MessageType.UserJoin) return;
+  await message
+    .delete()
+    .catch((error) => console.error('Не удалось удалить системное сообщение о заходе участника:', error));
+});
+
 client.on('channelCreate', (channel) => {
   verification
     .applyGateToNewChannel(channel)
@@ -90,6 +109,23 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
 
 client.on('roleUpdate', async (oldRole, newRole) => {
   await roster.updateRoster(newRole.guild).catch((error) => console.error('Не удалось обновить ростер:', error));
+});
+
+// Переименования уже подхватываются живьём (roster.js читает role.name из
+// кэша, а не из data/*.json), а вот удаление роли прямо в Discord (не через
+// /remove-ranks) иначе оставляло бы мёртвый roleId в gameRoles.json/
+// rankGames.json навсегда — обычная роль игры "затеняла" бы пустую лестницу
+// в roster.js (или наоборот), пока кто-то не выберет эту игру заново.
+client.on('roleDelete', async (role) => {
+  try {
+    const forgottenGeneric = gameRoles.forgetRole(role.id);
+    const forgottenRanked = rankGames.forgetRole(role.id);
+    if (forgottenGeneric || forgottenRanked) {
+      await roster.updateRoster(role.guild).catch((error) => console.error('Не удалось обновить ростер:', error));
+    }
+  } catch (error) {
+    console.error(`Не удалось синхронизировать данные после удаления роли ${role.id}:`, error);
+  }
 });
 
 client.on('interactionCreate', async (interaction) => {

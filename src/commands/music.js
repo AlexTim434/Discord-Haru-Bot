@@ -46,7 +46,10 @@ module.exports = {
         .setName('radio')
         .setDescription('Play similar tracks (YouTube Mix)')
         .addStringOption((opt) =>
-          opt.setName('query').setDescription('Track to seed from (defaults to the current one)'),
+          opt
+            .setName('query')
+            .setDescription('Track to seed from (defaults to the current one)')
+            .setAutocomplete(true),
         ),
     ),
 
@@ -113,12 +116,15 @@ module.exports = {
       let seedId = query ? null : musicPlayer.getPanelState(interaction.guild.id).current?.id;
 
       if (query) {
-        const results = await youtubeMusic.searchTracks(query, 1);
-        if (!results.length) {
+        // resolveTrack (не голый searchTracks) — как и в play, чтобы videoId,
+        // выбранный из автодополнения, резолвился напрямую, а не искался
+        // текстом заново.
+        const track = await resolveTrack(query);
+        if (!track) {
           await interaction.editReply(`${toSmallCaps('Not found')} — nothing matches "${query}".`);
           return;
         }
-        seedId = results[0].id;
+        seedId = track.id;
       }
 
       if (!seedId) {

@@ -3,29 +3,34 @@ const gameRoles = require('./gameRoles');
 const rankGames = require('./rankGames');
 const guildConfig = require('./guildConfig');
 
-function buildGameToRoles() {
+function buildGameToRoles(guild) {
   const generic = gameRoles.listAll();
   const ranked = rankGames.listAll();
 
   const gameToRoles = new Map();
 
   for (const entry of Object.values(generic)) {
-    if (ranked[entry.gameName.toLowerCase()]) continue;
+    const ladder = ranked[entry.gameName.toLowerCase()];
+    // Ранговая лестница прячет обычную роль той же игры, только пока в ней
+    // есть хоть одна реально существующая роль на сервере — иначе (роли
+    // лестницы удалили вручную, а данные о ней остались) обычная роль
+    // остаётся единственным источником правды о том, кто играет в эту игру.
+    const ladderHasLiveRole = ladder?.roles?.some((r) => guild.roles.cache.has(r.id));
+    if (ladderHasLiveRole) continue;
     gameToRoles.set(entry.gameName, [entry.roleId]);
   }
 
   for (const entry of Object.values(ranked)) {
-    gameToRoles.set(
-      entry.gameName,
-      entry.roles.map((r) => r.id),
-    );
+    const liveRoleIds = entry.roles.map((r) => r.id).filter((id) => guild.roles.cache.has(id));
+    if (!liveRoleIds.length) continue;
+    gameToRoles.set(entry.gameName, liveRoleIds);
   }
 
   return gameToRoles;
 }
 
 function buildRosterEmbed(guild) {
-  const gameToRoles = buildGameToRoles();
+  const gameToRoles = buildGameToRoles(guild);
   const sections = [];
 
   for (const [gameName, roleIds] of [...gameToRoles.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {

@@ -42,12 +42,12 @@ function buildEmbed(state) {
   const embed = new EmbedBuilder().setColor(0x5865f2).setTimestamp();
 
   if (!state.current) {
-    return embed.setTitle(`🎵 ${toSmallCaps('Music Panel')}`).setDescription('Nothing is playing yet.');
+    return embed.setTitle(`<a:60263cd:1533444661723791461> ${toSmallCaps('Music Panel')}`).setDescription('Nothing is playing yet.');
   }
 
   const { current } = state;
   embed
-    .setTitle(`🎵 ${toSmallCaps('Music Panel')}`)
+    .setTitle(`<a:60263cd:1533444661723791461> ${toSmallCaps('Music Panel')}`)
     .setDescription(`**[${current.title}](https://www.youtube.com/watch?v=${current.id})**`)
     .setThumbnail(`https://i.ytimg.com/vi/${current.id}/hqdefault.jpg`)
     .addFields(
