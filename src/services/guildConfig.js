@@ -115,6 +115,49 @@ function getUnverifiedRoleId(guildId) {
   return store[guildId]?.unverifiedRoleId ?? null;
 }
 
+function setVerifiedRoleId(guildId, roleId) {
+  const store = loadStore();
+  store[guildId] = { ...store[guildId], verifiedRoleId: roleId };
+  saveStore(store);
+}
+
+function getVerifiedRoleId(guildId) {
+  const store = loadStore();
+  return store[guildId]?.verifiedRoleId ?? null;
+}
+
+function setModeratorRoleId(guildId, roleId) {
+  const store = loadStore();
+  store[guildId] = { ...store[guildId], moderatorRoleId: roleId };
+  saveStore(store);
+}
+
+function getModeratorRoleId(guildId) {
+  const store = loadStore();
+  return store[guildId]?.moderatorRoleId ?? null;
+}
+
+function addAdminChannel(guildId, channelId) {
+  const store = loadStore();
+  const existing = store[guildId]?.adminChannelIds ?? [];
+  if (!existing.includes(channelId)) {
+    store[guildId] = { ...store[guildId], adminChannelIds: [...existing, channelId] };
+    saveStore(store);
+  }
+}
+
+function removeAdminChannel(guildId, channelId) {
+  const store = loadStore();
+  const existing = store[guildId]?.adminChannelIds ?? [];
+  store[guildId] = { ...store[guildId], adminChannelIds: existing.filter((id) => id !== channelId) };
+  saveStore(store);
+}
+
+function getAdminChannelIds(guildId) {
+  const store = loadStore();
+  return store[guildId]?.adminChannelIds ?? [];
+}
+
 module.exports = {
   setRosterChannel,
   getRosterChannelId,
@@ -134,4 +177,11 @@ module.exports = {
   getRulesText,
   setUnverifiedRoleId,
   getUnverifiedRoleId,
+  setVerifiedRoleId,
+  getVerifiedRoleId,
+  setModeratorRoleId,
+  getModeratorRoleId,
+  addAdminChannel,
+  removeAdminChannel,
+  getAdminChannelIds,
 };
