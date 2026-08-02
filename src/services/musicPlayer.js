@@ -12,15 +12,20 @@ const {
 const youtubeMusic = require('./youtubeMusic');
 
 const MAX_HISTORY = 20;
+// DHB-8: авто-отключение из голосового канала после долгого бездействия —
+// таймер стартует, когда играть больше нечего или плеер на паузе, и
+// сбрасывается, как только реально начинает идти звук (playTrack/resume).
+const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 
 // guildId -> { connection, player, guild, resource, queue: Track[], current: Track|null,
 //   history: Track[], radio: {seedId, originalSeedId}|null, volume, loopMode, autoplayEnabled,
 //   nextFromHistory, forceAdvance, panelChannelId, panelMessageId,
-//   lastTrack: Track|null, endReason: 'skip'|'stop'|'ended'|null,
+//   lastTrack: Track|null, endReason: 'skip'|'stop'|'ended'|'timeout'|null,
 //   endActorId: string|null (кто нажал skip/stop), pendingActorId: string|null,
 //   sessionId: number (растёт на каждый новый запуск с нуля — play/radio,
 //   когда до этого ничего не играло), panelSessionId: number|null (какой
-//   сессии принадлежит текущее сообщение-панель) }
+//   сессии принадлежит текущее сообщение-панель),
+//   inactivityTimer: NodeJS.Timeout|null }
 const states = new Map();
 
 let onUpdate = () => {};
@@ -58,10 +63,57 @@ function getState(guildId) {
       pendingActorId: null,
       sessionId: 0,
       panelSessionId: null,
+      inactivityTimer: null,
     };
     states.set(guildId, state);
   }
   return state;
+}
+
+function clearInactivityTimer(state) {
+  if (state.inactivityTimer) {
+    clearTimeout(state.inactivityTimer);
+    state.inactivityTimer = null;
+  }
+}
+
+function scheduleInactivityDisconnect(guildId) {
+  const state = getState(guildId);
+  clearInactivityTimer(state);
+  state.inactivityTimer = setTimeout(() => {
+    state.inactivityTimer = null;
+    disconnectIdle(guildId);
+  }, INACTIVITY_TIMEOUT_MS);
+}
+
+// Общая для stop() и авто-отключения по бездействию часть — рвёт voice-
+// соединение и плеер, сама не трогает queue/current/lastTrack/endReason,
+// это остаётся на вызывающей стороне (там разная семантика).
+function teardown(state) {
+  clearInactivityTimer(state);
+  if (state.player) {
+    state.player.removeAllListeners(AudioPlayerStatus.Idle);
+    state.player.stop();
+  }
+  state.player = null;
+  state.connection?.destroy();
+  state.connection = null;
+}
+
+function disconnectIdle(guildId) {
+  const state = getState(guildId);
+  if (!state.connection) return;
+
+  if (state.current) state.lastTrack = state.current;
+  state.endReason = 'timeout';
+  state.endActorId = null;
+  state.queue = [];
+  state.history = [];
+  state.radio = null;
+  state.autoplayEnabled = false;
+  state.current = null;
+  teardown(state);
+  notify(state.guild);
 }
 
 function spawnFfmpegResource(streamUrl, volume) {
@@ -97,6 +149,7 @@ async function playTrack(guildId, track) {
   const resource = spawnFfmpegResource(streamUrl, state.volume);
   state.resource = resource;
   state.player.play(resource);
+  clearInactivityTimer(state);
   notify(state.guild);
 }
 
@@ -126,6 +179,7 @@ async function playNext(guildId, { fromHistory = false, forceAdvance = false } =
     state.endActorId = forceAdvance ? state.pendingActorId : null;
     state.pendingActorId = null;
     state.current = null;
+    scheduleInactivityDisconnect(guildId);
     notify(state.guild);
     return;
   }
@@ -160,6 +214,7 @@ function ensurePlayer(guildId) {
 async function connect(voiceChannel) {
   const state = getState(voiceChannel.guild.id);
   state.guild = voiceChannel.guild;
+  clearInactivityTimer(state);
   const player = ensurePlayer(voiceChannel.guild.id);
 
   if (!state.connection) {
@@ -250,14 +305,20 @@ function skip(guildId, actorId) {
 function pause(guildId) {
   const state = getState(guildId);
   const ok = state.player?.pause() ?? false;
-  if (ok) notify(state.guild);
+  if (ok) {
+    scheduleInactivityDisconnect(guildId);
+    notify(state.guild);
+  }
   return ok;
 }
 
 function resume(guildId) {
   const state = getState(guildId);
   const ok = state.player?.unpause() ?? false;
-  if (ok) notify(state.guild);
+  if (ok) {
+    clearInactivityTimer(state);
+    notify(state.guild);
+  }
   return ok;
 }
 
@@ -273,16 +334,10 @@ function stop(guildId, actorId) {
   state.radio = null;
   state.autoplayEnabled = false;
   state.current = null;
-  // Снимаем слушатель Idle ДО stop() — иначе отложенное событие Idle само
-  // вызовет playNext и затрёт lastTrack/endReason, которые мы только что
-  // выставили, значением по умолчанию ("ended", без lastTrack).
-  if (state.player) {
-    state.player.removeAllListeners(AudioPlayerStatus.Idle);
-    state.player.stop();
-  }
-  state.player = null;
-  state.connection?.destroy();
-  state.connection = null;
+  // teardown() снимает слушатель Idle ДО player.stop() — иначе отложенное
+  // событие Idle само вызовет playNext и затрёт lastTrack/endReason, которые
+  // мы только что выставили, значением по умолчанию ("ended", без lastTrack).
+  teardown(state);
   notify(state.guild);
 }
 

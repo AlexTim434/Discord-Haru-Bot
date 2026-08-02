@@ -16,6 +16,7 @@ const END_REASON = {
   skip: { emoji: '⏭️', text: 'Skipped' },
   stop: { emoji: '✅', text: 'Stopped' },
   ended: { emoji: '🏁', text: 'Queue ended' },
+  timeout: { emoji: '💤', text: 'Disconnected (inactivity)' },
 };
 
 function formatDuration(ms) {
