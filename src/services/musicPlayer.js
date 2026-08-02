@@ -12,13 +12,19 @@ const {
 const youtubeMusic = require('./youtubeMusic');
 
 const MAX_HISTORY = 20;
+// Сколько последних id радио-трека помнить для отсева повторов — анонимный
+// (без авторизации) YouTube Mix часто возвращает те же треки в новых пачках,
+// без этого радио ощутимо "зацикливалось". Не безлимитно, чтобы не течь
+// памятью на многочасовых сессиях — после этого предела список повторов
+// просто начинает забывать самые старые записи.
+const RADIO_PLAYED_IDS_LIMIT = 300;
 // DHB-8: авто-отключение из голосового канала после долгого бездействия —
 // таймер стартует, когда играть больше нечего или плеер на паузе, и
 // сбрасывается, как только реально начинает идти звук (playTrack/resume).
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
 
 // guildId -> { connection, player, guild, resource, queue: Track[], current: Track|null,
-//   history: Track[], radio: {seedId, originalSeedId}|null, volume, loopMode, autoplayEnabled,
+//   history: Track[], radio: {seedId, originalSeedId, playedIds: Set<string>}|null, volume, loopMode, autoplayEnabled,
 //   nextFromHistory, forceAdvance, panelChannelId, panelMessageId,
 //   lastTrack: Track|null, endReason: 'skip'|'stop'|'ended'|'timeout'|null,
 //   endActorId: string|null (кто нажал skip/stop), pendingActorId: string|null,
@@ -153,6 +159,33 @@ async function playTrack(guildId, track) {
   notify(state.guild);
 }
 
+// Копит id уже сыгранных в этой радио-сессии треков и подрезает список,
+// когда он перерастает RADIO_PLAYED_IDS_LIMIT (Set в JS хранит порядок
+// вставки, так что удаляем именно самые старые записи).
+function rememberRadioTracks(radio, tracks) {
+  for (const track of tracks) radio.playedIds.add(track.id);
+  while (radio.playedIds.size > RADIO_PLAYED_IDS_LIMIT) {
+    radio.playedIds.delete(radio.playedIds.values().next().value);
+  }
+}
+
+// continueRadio сама рандомизирует следующую затравку (см.
+// youtubeMusic.pickNextSeed), но при анонимном (без авторизации) YouTube Mix
+// новая пачка может целиком состоять из уже сыгранных треков — тогда пробуем
+// ещё один заход со свежей затравкой вместо того, чтобы вернуть повторы.
+async function fetchFreshRadioBatch(radio) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const { seedId, tracks } = await youtubeMusic.continueRadio(radio.seedId, radio.originalSeedId);
+    radio.seedId = seedId;
+    const fresh = tracks.filter((t) => !radio.playedIds.has(t.id));
+    if (fresh.length) {
+      rememberRadioTracks(radio, fresh);
+      return fresh;
+    }
+  }
+  return [];
+}
+
 async function playNext(guildId, { fromHistory = false, forceAdvance = false } = {}) {
   const state = getState(guildId);
   if (!state.player) return;
@@ -163,12 +196,12 @@ async function playNext(guildId, { fromHistory = false, forceAdvance = false } =
   }
 
   if (!state.queue.length && state.radio) {
-    const { seedId, tracks } = await youtubeMusic.continueRadio(state.radio.seedId, state.radio.originalSeedId);
-    state.radio.seedId = seedId;
+    const tracks = await fetchFreshRadioBatch(state.radio);
     state.queue.push(...tracks);
   } else if (!state.queue.length && state.autoplayEnabled && state.current) {
     const radio = await youtubeMusic.startRadio(state.current.id);
-    state.radio = { seedId: radio.seedId, originalSeedId: radio.seedId };
+    state.radio = { seedId: radio.seedId, originalSeedId: radio.seedId, playedIds: new Set() };
+    rememberRadioTracks(state.radio, radio.tracks);
     state.queue.push(...radio.tracks);
   }
 
@@ -253,7 +286,8 @@ async function playRadio(voiceChannel, { seedId, originalSeedId, tracks }, reque
   if (state.current) stop(guildId, requestedBy);
 
   await connect(voiceChannel);
-  state.radio = { seedId, originalSeedId };
+  state.radio = { seedId, originalSeedId, playedIds: new Set() };
+  rememberRadioTracks(state.radio, tracks);
   state.autoplayEnabled = true;
   state.queue.push(...tracks.map((t) => ({ ...t, requestedBy })));
   state.sessionId += 1;
